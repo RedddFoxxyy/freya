@@ -217,6 +217,7 @@ impl OpenGLDriver {
 
     pub fn make_current(&mut self) {
         self.gl_context.make_current(&self.gl_surface).unwrap();
+        println!("{}", self.gr_context.resource_cache_usage().resource_bytes / 1024 / 1024);
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) -> (SkiaSurface, SkiaSurface) {

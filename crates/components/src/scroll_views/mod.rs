@@ -1,13 +1,12 @@
+mod dynamic_scroll_view;
 mod scroll_bar;
 mod scroll_thumb;
 mod scroll_view;
 mod use_scroll_controller;
 mod virtual_scroll_view;
 
-use freya_elements::events::{
-    keyboard::Key,
-    KeyboardEvent,
-};
+pub use dynamic_scroll_view::*;
+use freya_elements::events::{keyboard::Key, KeyboardEvent};
 pub use scroll_bar::*;
 pub use scroll_thumb::*;
 pub use scroll_view::*;

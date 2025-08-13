@@ -58,8 +58,7 @@ impl LayoutManager {
         }
     }
 
-    // NOTE: This might be required in future.
-    fn _update_length(&mut self, new_length: usize) {
+    fn update_length(&mut self, new_length: usize) {
         match new_length.cmp(&self.heights.len()) {
             Ordering::Greater => self.heights.resize(new_length, None),
             Ordering::Less => self.heights.truncate(new_length),
@@ -141,15 +140,11 @@ fn MeasuredItem(
     on_measure: EventHandler<(usize, f32)>,
 ) -> Element {
     let (node_ref, size) = use_node();
-    let mut last_reported_height = use_signal(|| 0.0_f32);
 
     // When the node's size changes, report it back to the parent.
     use_effect(use_reactive(&size, move |size| {
         let height = size.area.height();
-        let last_height = *last_reported_height.read();
-
-        if height > 0.0 && (last_height == 0.0 || (height - last_height).abs() > 2.0) {
-            *last_reported_height.write() = height;
+        if height > 0.0 {
             on_measure.call((index, height));
         }
     }));
@@ -218,7 +213,7 @@ impl<
             && self.scroll_controller == other.scroll_controller
             && self.show_scrollbar == other.show_scrollbar
             && self.scroll_with_arrows == other.scroll_with_arrows
-            && self.builder_args == other.builder_args // <-- The crucial comparison
+            && self.builder_args == other.builder_args
     }
 }
 
@@ -254,15 +249,18 @@ pub fn DynamicVirtualScrollView<
 
     // State for managing the layout cache
     let mut layout_manager = use_signal(|| LayoutManager::new(length, DEFAULT_ITEM_HEIGHT));
-    let mut is_updating = use_signal(|| false);
 
+    // This hook invalidates all measurements when the content changes
     use_effect(use_reactive(&builder_args, move |_| {
-        // NOTE: When the builder_args change, the underlying content is considered stale.
-        // It invalidates all cached heights to force re-measurement.
         let mut manager = layout_manager.write();
-        if !manager.heights.is_empty() {
-            manager.heights = vec![None; length];
+        for height in manager.heights.iter_mut() {
+            *height = None;
         }
+    }));
+
+    // This hook efficiently handles changes in the number of items
+    use_effect(use_reactive(&length, move |length| {
+        layout_manager.write().update_length(length);
     }));
 
     let total_content_height = layout_manager.read().get_total_height();
@@ -284,30 +282,9 @@ pub fn DynamicVirtualScrollView<
     let on_measure = move |(index, height): (usize, f32)| {
         let current_height = layout_manager.read().heights.get(index).cloned().flatten();
 
-        // Only update if height is significantly different or first measurement
-        if current_height
-            .map(|h| (h - height).abs() > 2.0)
-            .unwrap_or(true)
-        {
-            *is_updating.write() = true;
-
-            let old_total_height = layout_manager.read().get_total_height();
+        // Only update if the height is different to prevent re-render loops
+        if current_height.is_none() || current_height.unwrap() != height {
             layout_manager.write().set_item_height(index, height);
-            let new_total_height = layout_manager.read().get_total_height();
-
-            // Adjust scroll position to prevent bouncing when content above viewport changes
-            if index < visible_range.start && corrected_scrolled_y > 0.0 {
-                let height_diff = new_total_height - old_total_height;
-                if height_diff.abs() > 1.0 {
-                    let new_scroll = (corrected_scrolled_y + height_diff)
-                        .max(0.0)
-                        .min((new_total_height - viewport_height).max(0.0));
-
-                    *scrolled_y.write() = new_scroll as i32;
-                }
-            }
-
-            *is_updating.write() = false;
         }
     };
 

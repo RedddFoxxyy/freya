@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
-use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use dioxus::prelude::*;
 use freya_elements::{
@@ -26,50 +26,41 @@ const DEFAULT_ITEM_HEIGHT: f32 = 25.0;
 
 /// A layout cache to store and manage the heights of items.
 struct LayoutManager {
-    /// A vector storing the measured height of each item. `None` if not yet measured.
-    heights: Vec<Option<f32>>,
+    /// A vector storing the key and measured height of each item. `None` if not yet measured.
+    items: Vec<(u64, Option<f32>)>,
     /// The default height for unmeasured items.
     default_item_height: f32,
 }
 
 impl LayoutManager {
     /// Creates a new `LayoutManager`.
-    fn new(length: usize, default_item_height: f32) -> Self {
+    fn new(keys: Vec<u64>, default_item_height: f32) -> Self {
         Self {
-            heights: vec![None; length],
+            items: keys.into_iter().map(|key| (key, None)).collect(),
             default_item_height,
         }
     }
 
     /// Gets the height of a specific item, returning the default if not measured.
     fn get_item_height(&self, index: usize) -> f32 {
-        self.heights
+        self.items
             .get(index)
-            .cloned()
-            .flatten()
+            .and_then(|(_, height)| *height)
             .unwrap_or(self.default_item_height)
     }
 
     /// Updates the measured height of an item.
     fn set_item_height(&mut self, index: usize, height: f32) {
-        if let Some(item_height) = self.heights.get_mut(index) {
-            *item_height = Some(height);
-        }
-    }
-
-    fn update_length(&mut self, new_length: usize) {
-        match new_length.cmp(&self.heights.len()) {
-            Ordering::Greater => self.heights.resize(new_length, None),
-            Ordering::Less => self.heights.truncate(new_length),
-            Ordering::Equal => { /* nothing to do */ }
+        if let Some(item) = self.items.get_mut(index) {
+            item.1 = Some(height);
         }
     }
 
     /// Calculates the total estimated height of all items.
     fn get_total_height(&self) -> f32 {
-        self.heights
+        self.items
             .iter()
-            .map(|h| h.unwrap_or(self.default_item_height))
+            .map(|(_, h)| h.unwrap_or(self.default_item_height))
             .sum()
     }
 
@@ -80,7 +71,7 @@ impl LayoutManager {
         viewport_height: f32,
         overscan: usize,
     ) -> (std::ops::Range<usize>, f32) {
-        if self.heights.is_empty() {
+        if self.items.is_empty() {
             return (0..0, 0.0);
         }
 
@@ -90,7 +81,7 @@ impl LayoutManager {
         let mut found_start = false;
 
         // Find the start of the visible range
-        for (i, height) in self.heights.iter().enumerate() {
+        for (i, (_, height)) in self.items.iter().enumerate() {
             let item_height = height.unwrap_or(self.default_item_height);
             let next_y_pos = y_pos + item_height;
 
@@ -110,7 +101,7 @@ impl LayoutManager {
         // Find the end of the visible range
         let mut end_node = start_node;
         let mut visible_height = 0.0;
-        for (i, height) in self.heights.iter().enumerate().skip(start_node) {
+        for (i, (_, height)) in self.items.iter().enumerate().skip(start_node) {
             let item_height = height.unwrap_or(self.default_item_height);
             visible_height += item_height;
             end_node = i + 1;
@@ -121,7 +112,7 @@ impl LayoutManager {
 
         // Apply overscan to render items slightly outside the viewport for smoother scrolling
         let start = start_node.saturating_sub(overscan);
-        let end = (end_node + overscan).min(self.heights.len());
+        let end = (end_node + overscan).min(self.items.len());
 
         // Recalculate content offset based on the new start index with overscan
         let overscan_offset: f32 = (start..start_node).map(|i| self.get_item_height(i)).sum();
@@ -160,10 +151,7 @@ fn MeasuredItem(
 
 /// Properties for the [`DynamicVirtualScrollView`] component.
 #[derive(Props, Clone)]
-pub struct DynamicVirtualScrollViewProps<
-    Builder: 'static + Clone + Fn(usize, &Option<BuilderArgs>) -> Element,
-    BuilderArgs: Clone + 'static + PartialEq = (),
-> {
+pub struct DynamicVirtualScrollViewProps<Builder: 'static + Clone + Fn(usize) -> Element> {
     /// Width of the container.
     #[props(default = "fill".into())]
     pub width: String,
@@ -175,12 +163,10 @@ pub struct DynamicVirtualScrollViewProps<
     pub padding: String,
     /// Theme for the scrollbar.
     pub scrollbar_theme: Option<ScrollBarThemeWith>,
-    /// The total number of items.
-    pub length: usize,
     /// A function to build a single item.
     pub builder: Builder,
-    #[props(into)]
-    pub builder_args: Option<BuilderArgs>,
+    /// A unique and stable key for each item.
+    pub item_keys: Vec<u64>,
     /// The number of items to render outside the visible viewport.
     #[props(default = 5)]
     pub overscan: usize,
@@ -198,44 +184,36 @@ pub struct DynamicVirtualScrollViewProps<
     pub invert_scroll_wheel: bool,
 }
 
-impl<
-        BuilderArgs: Clone + PartialEq,
-        Builder: Clone + Fn(usize, &Option<BuilderArgs>) -> Element,
-    > PartialEq for DynamicVirtualScrollViewProps<Builder, BuilderArgs>
-{
+impl<Builder: Clone + Fn(usize) -> Element> PartialEq for DynamicVirtualScrollViewProps<Builder> {
     fn eq(&self, other: &Self) -> bool {
         self.width == other.width
             && self.height == other.height
             && self.padding == other.padding
-            && self.length == other.length
             && self.overscan == other.overscan
             && self.scroll_controller == other.scroll_controller
             && self.show_scrollbar == other.show_scrollbar
             && self.scroll_with_arrows == other.scroll_with_arrows
-            && self.builder_args == other.builder_args
+            // Compare keys to determine if a re-render is needed
+            && self.item_keys == other.item_keys
     }
 }
 
 /// A high-performance scroll view for a large number of items with variable heights.
 #[allow(non_snake_case)]
-pub fn DynamicVirtualScrollView<
-    Builder: Clone + Fn(usize, &Option<BuilderArgs>) -> Element,
-    BuilderArgs: Clone + PartialEq,
->(
+pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     DynamicVirtualScrollViewProps {
         width,
         height,
         padding,
         scrollbar_theme,
-        length,
         builder,
-        builder_args,
+        item_keys,
         overscan,
         scroll_controller,
         show_scrollbar,
         scroll_with_arrows,
         invert_scroll_wheel,
-    }: DynamicVirtualScrollViewProps<Builder, BuilderArgs>,
+    }: DynamicVirtualScrollViewProps<Builder>,
 ) -> Element {
     let scroll_controller =
         scroll_controller.unwrap_or_else(|| use_scroll_controller(ScrollConfig::default));
@@ -247,21 +225,27 @@ pub fn DynamicVirtualScrollView<
     let applied_scrollbar_theme = use_applied_theme!(&scrollbar_theme, scroll_bar);
 
     // State for managing the layout cache
-    let mut layout_manager = use_signal(|| LayoutManager::new(length, DEFAULT_ITEM_HEIGHT));
+    let mut layout_manager =
+        use_signal(|| LayoutManager::new(item_keys.clone(), DEFAULT_ITEM_HEIGHT));
 
-    // This hook invalidates all measurements when the content changes
-    // TODO: Implement a more efficient way to invalidate measurements, such as using a cache key or a hash of the content.
-    use_effect(use_reactive(&builder_args, move |_| {
+    // This hook efficiently updates the layout manager when items change.
+    // It preserves the heights of items whose keys have not changed,
+    // and invalidates the rest.
+    use_effect(use_reactive(&item_keys, move |new_keys| {
         let mut manager = layout_manager.write();
-        for height in manager.heights.iter_mut() {
-            *height = None;
-        }
-    }));
 
-    // This hook efficiently handles changes in the number of items
-    // TODO: This is shit fix this.
-    use_effect(use_reactive(&length, move |length| {
-        layout_manager.write().update_length(length);
+        // Store old heights in a HashMap for quick lookup
+        let old_heights: HashMap<u64, Option<f32>> =
+            HashMap::from_iter(manager.items.iter().cloned());
+
+        // Create the new list of items, preserving heights where keys match
+        manager.items = new_keys
+            .into_iter()
+            .map(|key| {
+                let height = old_heights.get(&key).cloned().flatten();
+                (key, height)
+            })
+            .collect();
     }));
 
     let total_content_height = layout_manager.read().get_total_height();
@@ -281,7 +265,7 @@ pub fn DynamicVirtualScrollView<
 
     // Event handler to update the layout cache when an item is measured
     let on_measure = move |(index, height): (usize, f32)| {
-        let current_height = layout_manager.read().heights.get(index).cloned().flatten();
+        let current_height = layout_manager.read().items.get(index).and_then(|(_, h)| *h);
 
         // Only update if the height is different to prevent re-render loops
         if current_height.is_none() || current_height.unwrap() != height {
@@ -406,7 +390,7 @@ pub fn DynamicVirtualScrollView<
 
     // Generate visible items with stable keys
     let visible_items = visible_range.clone().map(|i| {
-        let child = (builder)(i, &builder_args);
+        let child = (builder)(i);
         rsx! {
             MeasuredItem {
                 key: "{i}",

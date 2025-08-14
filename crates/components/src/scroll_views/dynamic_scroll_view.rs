@@ -9,7 +9,7 @@ use freya_elements::{
     self as dioxus_elements,
     events::{keyboard::Key, KeyboardEvent, MouseEvent, WheelEvent},
 };
-use freya_hooks::{use_applied_theme, use_focus, use_node, ScrollBarThemeWith};
+use freya_hooks::{use_applied_theme, use_focus, use_node, use_node_signal, ScrollBarThemeWith};
 
 use crate::{
     get_corrected_scroll_position, get_scroll_position_from_cursor, get_scroll_position_from_wheel,
@@ -25,7 +25,6 @@ use crate::{
 const DEFAULT_ITEM_HEIGHT: f32 = 25.0;
 
 /// A layout cache to store and manage the heights of items.
-#[derive(Clone)]
 struct LayoutManager {
     /// A vector storing the measured height of each item. `None` if not yet measured.
     heights: Vec<Option<f32>>,
@@ -139,11 +138,11 @@ fn MeasuredItem(
     index: usize,
     on_measure: EventHandler<(usize, f32)>,
 ) -> Element {
-    let (node_ref, size) = use_node();
+    let (node_ref, size) = use_node_signal();
 
     // When the node's size changes, report it back to the parent.
     use_effect(use_reactive(&size, move |size| {
-        let height = size.area.height();
+        let height = size().area.height();
         if height > 0.0 {
             on_measure.call((index, height));
         }
@@ -251,6 +250,7 @@ pub fn DynamicVirtualScrollView<
     let mut layout_manager = use_signal(|| LayoutManager::new(length, DEFAULT_ITEM_HEIGHT));
 
     // This hook invalidates all measurements when the content changes
+    // TODO: Implement a more efficient way to invalidate measurements, such as using a cache key or a hash of the content.
     use_effect(use_reactive(&builder_args, move |_| {
         let mut manager = layout_manager.write();
         for height in manager.heights.iter_mut() {
@@ -259,6 +259,7 @@ pub fn DynamicVirtualScrollView<
     }));
 
     // This hook efficiently handles changes in the number of items
+    // TODO: This is shit fix this.
     use_effect(use_reactive(&length, move |length| {
         layout_manager.write().update_length(length);
     }));
@@ -410,7 +411,7 @@ pub fn DynamicVirtualScrollView<
             MeasuredItem {
                 key: "{i}",
                 index: i,
-                on_measure: on_measure,
+                on_measure,
                 {child}
             }
         }

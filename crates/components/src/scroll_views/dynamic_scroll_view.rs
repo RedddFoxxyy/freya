@@ -220,7 +220,7 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     let mut clicking_shift = use_signal(|| false);
     let mut clicking_alt = use_signal(|| false);
     let (mut scrolled_x, mut scrolled_y) = scroll_controller.into();
-    let (node_ref, size) = use_node();
+    let (node_ref, size) = use_node_signal();
     let mut focus = use_focus();
     let applied_scrollbar_theme = use_applied_theme!(&scrollbar_theme, scroll_bar);
 
@@ -228,17 +228,18 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     let mut layout_manager =
         use_signal(|| LayoutManager::new(item_keys.clone(), DEFAULT_ITEM_HEIGHT));
 
-    // This hook efficiently updates the layout manager when items change.
-    // It preserves the heights of items whose keys have not changed,
+    // Updates the layout manager when items change,
+    // preserves the heights of items whose keys have not changed,
     // and invalidates the rest.
     use_effect(use_reactive(&item_keys, move |new_keys| {
         let mut manager = layout_manager.write();
 
+        // NOTE: Umm I was not able to figure out how to preserve the heights of items whose keys have not changed
+        // so I used a HashMap to store the old heights for quick lookup.
         // Store old heights in a HashMap for quick lookup
         let old_heights: HashMap<u64, Option<f32>> =
             HashMap::from_iter(manager.items.iter().cloned());
 
-        // Create the new list of items, preserving heights where keys match
         manager.items = new_keys
             .into_iter()
             .map(|key| {
@@ -249,7 +250,7 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     }));
 
     let total_content_height = layout_manager.read().get_total_height();
-    let viewport_height = size.area.height();
+    let viewport_height = size().area.height();
 
     let corrected_scrolled_y = get_corrected_scroll_position(
         total_content_height,
@@ -314,7 +315,7 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     let oncaptureglobalmousemove = move |e: MouseEvent| {
         if let Some((Axis::Y, y)) = *clicking_scrollbar.peek() {
             let coordinates = e.get_element_coordinates();
-            let cursor_y = coordinates.y - y - size.area.min_y() as f64;
+            let cursor_y = coordinates.y - y - size().area.min_y() as f64;
             let scroll_position = get_scroll_position_from_cursor(
                 cursor_y as f32,
                 total_content_height,

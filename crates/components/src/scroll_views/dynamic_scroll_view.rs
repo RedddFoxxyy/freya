@@ -61,7 +61,7 @@ impl LayoutManager {
         positions
     }
 
-    /// Recalculates all item positions. This should be called whenever item heights change.
+    /// Recalculates all item positions.
     fn recalculate_positions(&mut self) {
         self.item_positions = Self::calculate_positions(&self.items, self.default_item_height);
     }
@@ -73,18 +73,16 @@ impl LayoutManager {
             .unwrap_or(self.default_item_height)
     }
 
-    /// **OPTIMIZED**: Incrementally updates item positions instead of a full recalculation.
+    /// Incrementally updates item positions.
     fn set_item_height(&mut self, index: usize, height: f32) {
         if let Some(item) = self.items.get_mut(index) {
             let old_height = item.1.unwrap_or(self.default_item_height);
 
-            // Check if height has actually changed to avoid unnecessary work
             if item.1 != Some(height) {
                 let height_delta = height - old_height;
                 item.1 = Some(height);
 
                 // If there's a change in height, incrementally update all subsequent item positions.
-                // This is much more efficient than a full recalculation.
                 if height_delta != 0.0 {
                     for i in (index + 1)..self.item_positions.len() {
                         self.item_positions[i] += height_delta;
@@ -192,7 +190,7 @@ pub struct DynamicVirtualScrollViewProps<Builder: 'static + Clone + Fn(usize) ->
     /// A unique and stable key for each item.
     pub item_keys: Vec<u64>,
     /// The number of items to render outside the visible viewport.
-    #[props(default = 5)]
+    #[props(default = 3)]
     pub overscan: usize,
     /// A custom scroll controller.
     pub scroll_controller: Option<ScrollController>,
@@ -247,53 +245,9 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     let mut focus = use_focus();
     let applied_scrollbar_theme = use_applied_theme!(&scrollbar_theme, scroll_bar);
 
-    let mut scroll_anchor = use_signal(|| (0_usize, 0.0_f32));
-
     // State for managing the layout cache
     let mut layout_manager =
         use_signal(|| LayoutManager::new(item_keys.clone(), DEFAULT_ITEM_HEIGHT));
-
-    // Updates the layout manager when items change,
-    // preserves the heights of items whose keys have not changed,
-    // and invalidates the rest.
-    use_effect(use_reactive(&item_keys, move |new_keys| {
-        let mut manager = layout_manager.write();
-
-        // NOTE: Umm I was not able to figure out how to preserve the heights of items whose keys have not changed
-        // so I used a HashMap to store the old heights for quick lookup.
-        // Store old heights in a HashMap for quick lookup
-        let old_heights: HashMap<u64, Option<f32>> =
-            HashMap::from_iter(manager.items.iter().cloned());
-
-        manager.items = new_keys
-            .into_iter()
-            .map(|key| {
-                let height = old_heights.get(&key).cloned().flatten();
-                (key, height)
-            })
-            .collect();
-
-        // After items are updated, their positions must be recalculated.
-        manager.recalculate_positions();
-
-        let (anchor_index, anchor_offset) = *scroll_anchor.read();
-
-        // Clamp the anchor index in case items were deleted
-        let safe_anchor_index = anchor_index.min(manager.items.len().saturating_sub(1));
-
-        // Calculate the new pixel position of the anchor item using the pre-calculated positions.
-        // This avoids the expensive `.sum()` operation.
-        let new_top_position = manager
-            .item_positions
-            .get(safe_anchor_index)
-            .cloned()
-            .unwrap_or(0.0);
-
-        let new_scrolled_y = -(new_top_position + anchor_offset);
-
-        // Update the scroll position. This overrides the old, incorrect value.
-        scrolled_y.set(new_scrolled_y as i32);
-    }));
 
     let total_content_height = layout_manager.read().get_total_height();
     let viewport_height = size().area.height();
@@ -310,6 +264,66 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
         overscan,
     );
 
+    // Updates the layout manager when items change,
+    // preserves the heights of items whose keys have not changed,
+    // and invalidates the rest.
+    use_effect(use_reactive(&item_keys, move |new_keys| {
+        let mut manager = layout_manager.write();
+
+        let current_scroll = corrected_scrolled_y;
+        let target_y = -current_scroll;
+
+        // Find current anchor before items change
+        let old_anchor = if !manager.items.is_empty() && !manager.item_positions.is_empty() {
+            let search_result = manager.item_positions.binary_search_by(|pos| {
+                pos.partial_cmp(&target_y)
+                    .unwrap_or(std::cmp::Ordering::Less)
+            });
+            let anchor_index = match search_result {
+                Ok(index) => index,
+                Err(index) => index.saturating_sub(1),
+            };
+            let safe_anchor_index = anchor_index.min(manager.items.len().saturating_sub(1));
+            let anchor_y_pos = manager
+                .item_positions
+                .get(safe_anchor_index)
+                .cloned()
+                .unwrap_or(0.0);
+            let offset = target_y - anchor_y_pos;
+            Some((safe_anchor_index, offset))
+        } else {
+            None
+        };
+
+        let old_heights: HashMap<u64, Option<f32>> =
+            HashMap::from_iter(manager.items.iter().cloned());
+
+        manager.items = new_keys
+            .into_iter()
+            .map(|key| {
+                let height = old_heights.get(&key).cloned().flatten();
+                (key, height)
+            })
+            .collect();
+
+        manager.recalculate_positions();
+
+        // Only adjust scroll position if we had a valid anchor
+        if let Some((anchor_index, anchor_offset)) = old_anchor {
+            if !manager.items.is_empty() && !manager.item_positions.is_empty() {
+                let safe_anchor_index = anchor_index.min(manager.items.len().saturating_sub(1));
+                let new_top_position = manager
+                    .item_positions
+                    .get(safe_anchor_index)
+                    .cloned()
+                    .unwrap_or(0.0);
+
+                let new_scrolled_y = -(new_top_position + anchor_offset);
+                scrolled_y.set(new_scrolled_y as i32);
+            }
+        }
+    }));
+
     // Event handler to update the layout cache when an item is measured
     let on_measure = move |(index, height): (usize, f32)| {
         let current_height = layout_manager.read().items.get(index).and_then(|(_, h)| *h);
@@ -320,41 +334,6 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     };
 
     let mut clicking_scrollbar = use_signal::<Option<(Axis, f64)>>(|| None);
-
-    use_effect(use_reactive(&corrected_scrolled_y, move |scrolled_y_val| {
-        let layout = layout_manager.read();
-        if layout.items.is_empty() {
-            return;
-        }
-
-        let target_y = -scrolled_y_val;
-
-        let search_result = layout.item_positions.binary_search_by(|pos| {
-            pos.partial_cmp(&target_y)
-                .unwrap_or(std::cmp::Ordering::Less)
-        });
-
-        let anchor_index = match search_result {
-            Ok(index) => index,                    // Exactly at the start of an item
-            Err(index) => index.saturating_sub(1), // Scrolled partway into an item
-        };
-
-        // Ensure the index is within bounds.
-        let safe_anchor_index = anchor_index.min(layout.items.len().saturating_sub(1));
-
-        // The y-position of the anchor item's top edge.
-        let anchor_y_pos = layout
-            .item_positions
-            .get(safe_anchor_index)
-            .cloned()
-            .unwrap_or(0.0);
-
-        // The offset is how far we've scrolled *into* the anchor item.
-        let offset = target_y - anchor_y_pos;
-
-        // Update the scroll anchor.
-        scroll_anchor.set((safe_anchor_index, offset));
-    }));
 
     let onwheel = move |e: WheelEvent| {
         let speed_multiplier = if *clicking_alt.peek() {

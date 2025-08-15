@@ -30,6 +30,8 @@ const DEFAULT_ITEM_HEIGHT: f32 = 25.0;
 struct LayoutManager {
     /// A vector storing the key and measured height of each item. `None` if not yet measured.
     items: Vec<(u64, Option<f32>)>,
+    /// The starting y-position of each item, pre-calculated for performance.
+    item_positions: Vec<f32>,
     /// The default height for unmeasured items.
     default_item_height: f32,
 }
@@ -37,10 +39,31 @@ struct LayoutManager {
 impl LayoutManager {
     /// Creates a new `LayoutManager`.
     fn new(keys: Vec<u64>, default_item_height: f32) -> Self {
+        let items: Vec<(u64, Option<f32>)> = keys.into_iter().map(|key| (key, None)).collect();
+
+        let item_positions = Self::calculate_positions(&items, default_item_height);
+
         Self {
-            items: keys.into_iter().map(|key| (key, None)).collect(),
+            items,
+            item_positions,
             default_item_height,
         }
+    }
+
+    /// Helper function to compute the starting y-position for every item.
+    fn calculate_positions(items: &[(u64, Option<f32>)], default_item_height: f32) -> Vec<f32> {
+        let mut positions = Vec::with_capacity(items.len());
+        let mut current_pos = 0.0;
+        for (_, height) in items {
+            positions.push(current_pos);
+            current_pos += height.unwrap_or(default_item_height);
+        }
+        positions
+    }
+
+    /// Recalculates all item positions. This should be called whenever item heights change.
+    fn recalculate_positions(&mut self) {
+        self.item_positions = Self::calculate_positions(&self.items, self.default_item_height);
     }
 
     fn get_item_height(&self, index: usize) -> f32 {
@@ -50,18 +73,35 @@ impl LayoutManager {
             .unwrap_or(self.default_item_height)
     }
 
+    /// **OPTIMIZED**: Incrementally updates item positions instead of a full recalculation.
     fn set_item_height(&mut self, index: usize, height: f32) {
         if let Some(item) = self.items.get_mut(index) {
-            item.1 = Some(height);
+            let old_height = item.1.unwrap_or(self.default_item_height);
+
+            // Check if height has actually changed to avoid unnecessary work
+            if item.1 != Some(height) {
+                let height_delta = height - old_height;
+                item.1 = Some(height);
+
+                // If there's a change in height, incrementally update all subsequent item positions.
+                // This is much more efficient than a full recalculation.
+                if height_delta != 0.0 {
+                    for i in (index + 1)..self.item_positions.len() {
+                        self.item_positions[i] += height_delta;
+                    }
+                }
+            }
         }
     }
 
     /// Total height of the scrollview ( summation of heights of all items).
     fn get_total_height(&self) -> f32 {
-        self.items
-            .iter()
-            .map(|(_, h)| h.unwrap_or(self.default_item_height))
-            .sum()
+        if let Some(last_pos) = self.item_positions.last() {
+            // The total height is the starting position of the last item plus its own height.
+            *last_pos + self.get_item_height(self.items.len() - 1)
+        } else {
+            0.0
+        }
     }
 
     /// Calculates the visible range of items and the offset for the content window.
@@ -75,35 +115,20 @@ impl LayoutManager {
             return (0..0, 0.0);
         }
 
-        let mut y_pos = 0.0;
-        let mut start_node = 0;
-        let mut content_offset = 0.0;
-        let mut found_start = false;
+        let search_pos = -scroll_y;
+        let start_node = match self
+            .item_positions
+            .binary_search_by(|pos| pos.partial_cmp(&search_pos).unwrap())
+        {
+            Ok(index) => index,
+            Err(index) => index.saturating_sub(1), // The item before the insertion point.
+        };
 
-        // Find the start of the visible range
-        for (i, (_, height)) in self.items.iter().enumerate() {
-            let item_height = height.unwrap_or(self.default_item_height);
-            let next_y_pos = y_pos + item_height;
-
-            if next_y_pos >= -scroll_y {
-                content_offset = y_pos;
-                start_node = i;
-                found_start = true;
-                break;
-            }
-            y_pos = next_y_pos;
-        }
-
-        if !found_start {
-            return (0..0, 0.0);
-        }
-
-        // Find the end of the visible range
+        // Find the end of the visible range by iterating forward from the start.
         let mut end_node = start_node;
         let mut visible_height = 0.0;
-        for (i, (_, height)) in self.items.iter().enumerate().skip(start_node) {
-            let item_height = height.unwrap_or(self.default_item_height);
-            visible_height += item_height;
+        for i in start_node..self.items.len() {
+            visible_height += self.get_item_height(i);
             end_node = i + 1;
             if visible_height >= viewport_height {
                 break;
@@ -114,9 +139,8 @@ impl LayoutManager {
         let start = start_node.saturating_sub(overscan);
         let end = (end_node + overscan).min(self.items.len());
 
-        // Recalculate content offset based on the new start index with overscan
-        let overscan_offset: f32 = (start..start_node).map(|i| self.get_item_height(i)).sum();
-        let content_offset = content_offset - overscan_offset;
+        // The content offset is simply the pre-calculated starting position of the first rendered item.
+        let content_offset = self.item_positions.get(start).cloned().unwrap_or(0.0);
 
         (start..end, content_offset)
     }
@@ -249,21 +273,25 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
             })
             .collect();
 
+        // After items are updated, their positions must be recalculated.
+        manager.recalculate_positions();
+
         let (anchor_index, anchor_offset) = *scroll_anchor.read();
-        // let new_layout = manager;
 
         // Clamp the anchor index in case items were deleted
         let safe_anchor_index = anchor_index.min(manager.items.len().saturating_sub(1));
 
-        // Calculate the new pixel position of the anchor item
-        let new_top_position: f32 = (0..safe_anchor_index)
-            .map(|i| manager.get_item_height(i))
-            .sum();
+        // Calculate the new pixel position of the anchor item using the pre-calculated positions.
+        // This avoids the expensive `.sum()` operation.
+        let new_top_position = manager
+            .item_positions
+            .get(safe_anchor_index)
+            .cloned()
+            .unwrap_or(0.0);
 
         let new_scrolled_y = -(new_top_position + anchor_offset);
 
         // Update the scroll position. This overrides the old, incorrect value.
-        // Use `set` instead of `write` if it's a Dioxus signal to trigger updates.
         scrolled_y.set(new_scrolled_y as i32);
     }));
 
@@ -299,44 +327,33 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
             return;
         }
 
-        let (last_anchor_index, _) = *scroll_anchor.read();
+        let target_y = -scrolled_y_val;
 
-        // Calculate the y position of the last known anchor.
-        // This is our starting point for the search.
-        let mut y_pos: f32 = (0..last_anchor_index)
-            .map(|i| layout.get_item_height(i))
-            .sum();
+        let search_result = layout.item_positions.binary_search_by(|pos| {
+            pos.partial_cmp(&target_y)
+                .unwrap_or(std::cmp::Ordering::Less)
+        });
 
-        // Determine scroll direction to optimize our search
-        if -scrolled_y_val > y_pos {
-            // SCROLLING DOWN: Search forward from the last anchor
-            for i in last_anchor_index..layout.items.len() {
-                let item_height = layout.get_item_height(i);
-                let next_y_pos = y_pos + item_height;
+        let anchor_index = match search_result {
+            Ok(index) => index,                    // Exactly at the start of an item
+            Err(index) => index.saturating_sub(1), // Scrolled partway into an item
+        };
 
-                if next_y_pos >= -scrolled_y_val {
-                    let index = i;
-                    let offset = -scrolled_y_val - y_pos;
-                    *scroll_anchor.write() = (index, offset);
-                    return; // Found it, exit early
-                }
-                y_pos = next_y_pos;
-            }
-        } else {
-            // SCROLLING UP: Search backward from the last anchor
-            for i in (0..=last_anchor_index).rev() {
-                let item_height = layout.get_item_height(i);
-                let current_item_y_pos = y_pos - item_height;
+        // Ensure the index is within bounds.
+        let safe_anchor_index = anchor_index.min(layout.items.len().saturating_sub(1));
 
-                if current_item_y_pos <= -scrolled_y_val {
-                    let index = i;
-                    let offset = -scrolled_y_val - current_item_y_pos;
-                    *scroll_anchor.write() = (index, offset);
-                    return; // Found it, exit early
-                }
-                y_pos = current_item_y_pos;
-            }
-        }
+        // The y-position of the anchor item's top edge.
+        let anchor_y_pos = layout
+            .item_positions
+            .get(safe_anchor_index)
+            .cloned()
+            .unwrap_or(0.0);
+
+        // The offset is how far we've scrolled *into* the anchor item.
+        let offset = target_y - anchor_y_pos;
+
+        // Update the scroll anchor.
+        scroll_anchor.set((safe_anchor_index, offset));
     }));
 
     let onwheel = move |e: WheelEvent| {
@@ -454,10 +471,15 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
 
     // Generate visible items with stable keys
     let visible_items = visible_range.clone().map(|i| {
+        let stable_key = layout_manager
+            .read()
+            .items
+            .get(i)
+            .map_or(i as u64, |(key, _)| *key);
         let child = (builder)(i);
         rsx! {
             MeasuredItem {
-                key: "{i}",
+                key: "{stable_key}",
                 index: i,
                 on_measure,
                 {child}

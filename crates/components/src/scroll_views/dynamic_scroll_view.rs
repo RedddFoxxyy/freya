@@ -9,7 +9,7 @@ use freya_elements::{
     self as dioxus_elements,
     events::{keyboard::Key, KeyboardEvent, MouseEvent, WheelEvent},
 };
-use freya_hooks::{use_applied_theme, use_focus, use_node, use_node_signal, ScrollBarThemeWith};
+use freya_hooks::{use_applied_theme, use_focus, use_node_signal, ScrollBarThemeWith};
 
 use crate::{
     get_corrected_scroll_position, get_scroll_position_from_cursor, get_scroll_position_from_wheel,
@@ -25,6 +25,8 @@ use crate::{
 const DEFAULT_ITEM_HEIGHT: f32 = 25.0;
 
 /// A layout cache to store and manage the heights of items.
+///
+/// NOTE: Still in development and unstable.
 struct LayoutManager {
     /// A vector storing the key and measured height of each item. `None` if not yet measured.
     items: Vec<(u64, Option<f32>)>,
@@ -41,7 +43,6 @@ impl LayoutManager {
         }
     }
 
-    /// Gets the height of a specific item, returning the default if not measured.
     fn get_item_height(&self, index: usize) -> f32 {
         self.items
             .get(index)
@@ -49,14 +50,13 @@ impl LayoutManager {
             .unwrap_or(self.default_item_height)
     }
 
-    /// Updates the measured height of an item.
     fn set_item_height(&mut self, index: usize, height: f32) {
         if let Some(item) = self.items.get_mut(index) {
             item.1 = Some(height);
         }
     }
 
-    /// Calculates the total estimated height of all items.
+    /// Total height of the scrollview ( summation of heights of all items).
     fn get_total_height(&self) -> f32 {
         self.items
             .iter()
@@ -193,7 +193,6 @@ impl<Builder: Clone + Fn(usize) -> Element> PartialEq for DynamicVirtualScrollVi
             && self.scroll_controller == other.scroll_controller
             && self.show_scrollbar == other.show_scrollbar
             && self.scroll_with_arrows == other.scroll_with_arrows
-            // Compare keys to determine if a re-render is needed
             && self.item_keys == other.item_keys
     }
 }
@@ -224,6 +223,8 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     let mut focus = use_focus();
     let applied_scrollbar_theme = use_applied_theme!(&scrollbar_theme, scroll_bar);
 
+    let mut scroll_anchor = use_signal(|| (0_usize, 0.0_f32));
+
     // State for managing the layout cache
     let mut layout_manager =
         use_signal(|| LayoutManager::new(item_keys.clone(), DEFAULT_ITEM_HEIGHT));
@@ -247,6 +248,23 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
                 (key, height)
             })
             .collect();
+
+        let (anchor_index, anchor_offset) = *scroll_anchor.read();
+        // let new_layout = manager;
+
+        // Clamp the anchor index in case items were deleted
+        let safe_anchor_index = anchor_index.min(manager.items.len().saturating_sub(1));
+
+        // Calculate the new pixel position of the anchor item
+        let new_top_position: f32 = (0..safe_anchor_index)
+            .map(|i| manager.get_item_height(i))
+            .sum();
+
+        let new_scrolled_y = -(new_top_position + anchor_offset);
+
+        // Update the scroll position. This overrides the old, incorrect value.
+        // Use `set` instead of `write` if it's a Dioxus signal to trigger updates.
+        scrolled_y.set(new_scrolled_y as i32);
     }));
 
     let total_content_height = layout_manager.read().get_total_height();
@@ -268,13 +286,58 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     let on_measure = move |(index, height): (usize, f32)| {
         let current_height = layout_manager.read().items.get(index).and_then(|(_, h)| *h);
 
-        // Only update if the height is different to prevent re-render loops
         if current_height.is_none() || current_height.unwrap() != height {
             layout_manager.write().set_item_height(index, height);
         }
     };
 
     let mut clicking_scrollbar = use_signal::<Option<(Axis, f64)>>(|| None);
+
+    use_effect(use_reactive(&corrected_scrolled_y, move |scrolled_y_val| {
+        let layout = layout_manager.read();
+        if layout.items.is_empty() {
+            return;
+        }
+
+        let (last_anchor_index, _) = *scroll_anchor.read();
+
+        // Calculate the y position of the last known anchor.
+        // This is our starting point for the search.
+        let mut y_pos: f32 = (0..last_anchor_index)
+            .map(|i| layout.get_item_height(i))
+            .sum();
+
+        // Determine scroll direction to optimize our search
+        if -scrolled_y_val > y_pos {
+            // SCROLLING DOWN: Search forward from the last anchor
+            for i in last_anchor_index..layout.items.len() {
+                let item_height = layout.get_item_height(i);
+                let next_y_pos = y_pos + item_height;
+
+                if next_y_pos >= -scrolled_y_val {
+                    let index = i;
+                    let offset = -scrolled_y_val - y_pos;
+                    *scroll_anchor.write() = (index, offset);
+                    return; // Found it, exit early
+                }
+                y_pos = next_y_pos;
+            }
+        } else {
+            // SCROLLING UP: Search backward from the last anchor
+            for i in (0..=last_anchor_index).rev() {
+                let item_height = layout.get_item_height(i);
+                let current_item_y_pos = y_pos - item_height;
+
+                if current_item_y_pos <= -scrolled_y_val {
+                    let index = i;
+                    let offset = -scrolled_y_val - current_item_y_pos;
+                    *scroll_anchor.write() = (index, offset);
+                    return; // Found it, exit early
+                }
+                y_pos = current_item_y_pos;
+            }
+        }
+    }));
 
     let onwheel = move |e: WheelEvent| {
         let speed_multiplier = if *clicking_alt.peek() {

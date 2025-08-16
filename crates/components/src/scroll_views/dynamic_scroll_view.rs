@@ -193,6 +193,9 @@ pub struct DynamicVirtualScrollViewProps<Builder: 'static + Clone + Fn(usize) ->
     /// Padding of the container.
     #[props(default = "0".to_string())]
     pub padding: String,
+    /// Default height of items that have not been measured yet.
+    #[props(default = DEFAULT_ITEM_HEIGHT)]
+    pub default_item_height: f32,
     /// Theme for the scrollbar.
     pub scrollbar_theme: Option<ScrollBarThemeWith>,
     /// Minimum height of the scroll thumb.
@@ -226,6 +229,7 @@ impl<Builder: Clone + Fn(usize) -> Element> PartialEq for DynamicVirtualScrollVi
         self.width == other.width
             && self.height == other.height
             && self.padding == other.padding
+            && self.default_item_height == other.default_item_height
             && self.overscan == other.overscan
             && self.scroll_controller == other.scroll_controller
             && self.scroll_beyond_last_item == other.scroll_beyond_last_item
@@ -243,6 +247,7 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
         width,
         height,
         padding,
+        default_item_height,
         scrollbar_theme,
         min_scrollthumb_height,
         builder,
@@ -266,7 +271,7 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
 
     // State for managing the layout cache
     let mut layout_manager =
-        use_signal(|| LayoutManager::new(item_keys.clone(), DEFAULT_ITEM_HEIGHT));
+        use_signal(|| LayoutManager::new(item_keys.clone(), default_item_height));
 
     let total_content_height = layout_manager
         .read()

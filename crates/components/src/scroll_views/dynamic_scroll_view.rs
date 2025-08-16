@@ -93,12 +93,13 @@ impl LayoutManager {
     }
 
     /// Total height of the scrollview ( summation of heights of all items).
-    fn get_total_height(&self) -> f32 {
+    fn get_total_height(&self, scroll_beyond_last_item: usize) -> f32 {
         if let Some(last_pos) = self.item_positions.last() {
-            // The total height is the starting position of the last item plus its own height.
-            *last_pos + self.get_item_height(self.items.len() - 1)
+            let actual_content_height = *last_pos + self.get_item_height(self.items.len() - 1);
+            let beyond_height = scroll_beyond_last_item as f32 * self.default_item_height;
+            actual_content_height + beyond_height
         } else {
-            0.0
+            scroll_beyond_last_item as f32 * self.default_item_height
         }
     }
 
@@ -114,15 +115,26 @@ impl LayoutManager {
         }
 
         let search_pos = -scroll_y;
+
+        let actual_content_height = if let Some(last_pos) = self.item_positions.last() {
+            *last_pos + self.get_item_height(self.items.len() - 1)
+        } else {
+            0.0
+        };
+
+        // If scrolling beyond the actual content, return empty range.
+        if search_pos >= actual_content_height {
+            return (0..0, actual_content_height);
+        }
+
         let start_node = match self
             .item_positions
             .binary_search_by(|pos| pos.partial_cmp(&search_pos).unwrap())
         {
             Ok(index) => index,
-            Err(index) => index.saturating_sub(1), // The item before the insertion point.
+            Err(index) => index.saturating_sub(1),
         };
 
-        // Find the end of the visible range by iterating forward from the start.
         let mut end_node = start_node;
         let mut visible_height = 0.0;
         for i in start_node..self.items.len() {
@@ -133,11 +145,9 @@ impl LayoutManager {
             }
         }
 
-        // Apply overscan to render items slightly outside the viewport for smoother scrolling
         let start = start_node.saturating_sub(overscan);
         let end = (end_node + overscan).min(self.items.len());
 
-        // The content offset is simply the pre-calculated starting position of the first rendered item.
         let content_offset = self.item_positions.get(start).cloned().unwrap_or(0.0);
 
         (start..end, content_offset)
@@ -196,6 +206,9 @@ pub struct DynamicVirtualScrollViewProps<Builder: 'static + Clone + Fn(usize) ->
     pub overscan: usize,
     /// A custom scroll controller.
     pub scroll_controller: Option<ScrollController>,
+    /// The number of items to scroll beyond the last item.
+    #[props(default = 0)]
+    pub scroll_beyond_last_item: usize,
     /// Show the scrollbar.
     #[props(default = true)]
     pub show_scrollbar: bool,
@@ -215,7 +228,9 @@ impl<Builder: Clone + Fn(usize) -> Element> PartialEq for DynamicVirtualScrollVi
             && self.padding == other.padding
             && self.overscan == other.overscan
             && self.scroll_controller == other.scroll_controller
+            && self.scroll_beyond_last_item == other.scroll_beyond_last_item
             && self.show_scrollbar == other.show_scrollbar
+            && self.scrollbar_theme == other.scrollbar_theme
             && self.scroll_with_arrows == other.scroll_with_arrows
             && self.item_keys == other.item_keys
     }
@@ -234,6 +249,7 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
         item_keys,
         overscan,
         scroll_controller,
+        scroll_beyond_last_item,
         show_scrollbar,
         scroll_with_arrows,
         invert_scroll_wheel,
@@ -252,7 +268,9 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
     let mut layout_manager =
         use_signal(|| LayoutManager::new(item_keys.clone(), DEFAULT_ITEM_HEIGHT));
 
-    let total_content_height = layout_manager.read().get_total_height();
+    let total_content_height = layout_manager
+        .read()
+        .get_total_height(scroll_beyond_last_item);
     let viewport_height = size().area.height();
 
     let corrected_scrolled_y = get_corrected_scroll_position(
@@ -276,7 +294,7 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
         let current_scroll = corrected_scrolled_y;
         let target_y = -current_scroll;
 
-        // Find current anchor before items change
+        // Find current anchor before items change.
         let old_anchor = if !manager.items.is_empty() && !manager.item_positions.is_empty() {
             let search_result = manager.item_positions.binary_search_by(|pos| {
                 pos.partial_cmp(&target_y)

@@ -185,6 +185,8 @@ pub struct DynamicVirtualScrollViewProps<Builder: 'static + Clone + Fn(usize) ->
     pub padding: String,
     /// Theme for the scrollbar.
     pub scrollbar_theme: Option<ScrollBarThemeWith>,
+    /// Minimum height of the scroll thumb.
+    pub min_scrollthumb_height: Option<f32>,
     /// A function to build a single item.
     pub builder: Builder,
     /// A unique and stable key for each item.
@@ -227,6 +229,7 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
         height,
         padding,
         scrollbar_theme,
+        min_scrollthumb_height,
         builder,
         item_keys,
         overscan,
@@ -438,8 +441,12 @@ pub fn DynamicVirtualScrollView<Builder: Clone + Fn(usize) -> Element>(
         }
     };
 
-    let (scrollbar_y, scrollbar_height) =
+    let (scrollbar_y, mut scrollbar_height) =
         get_scrollbar_pos_and_size(total_content_height, viewport_height, corrected_scrolled_y);
+
+    if let Some(min_height) = min_scrollthumb_height {
+        scrollbar_height = scrollbar_height.max(min_height);
+    }
 
     let vertical_scrollbar_is_visible =
         is_scrollbar_visible(show_scrollbar, total_content_height, viewport_height);
